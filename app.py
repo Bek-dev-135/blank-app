@@ -62,8 +62,7 @@ def save_locations_to_db(locations_data: List[Dict]):
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS location_cache (
                 id SERIAL PRIMARY KEY,
-                location_identifier VARCHAR(255) UNIQUE,
-                location_type VARCHAR(50),
+                location_name VARCHAR(255) UNIQUE,
                 latitude DECIMAL(10, 8),
                 longitude DECIMAL(11, 8),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -77,107 +76,32 @@ def save_locations_to_db(locations_data: List[Dict]):
     
     with engine.connect() as conn:
         conn.execute(text("""
-            INSERT INTO location_cache (location_identifier, location_type, latitude, longitude)
-            SELECT location_identifier, location_type, latitude, longitude
+            INSERT INTO location_cache (location_name, latitude, longitude)
+            SELECT location_name, latitude, longitude
             FROM location_cache_temp
-            ON CONFLICT (location_identifier) DO UPDATE SET
+            ON CONFLICT (location_name) DO UPDATE SET
                 latitude = EXCLUDED.latitude,
-                longitude = EXCLUDED.longitude,
-                location_type = EXCLUDED.location_type
+                longitude = EXCLUDED.longitude
         """))
         conn.execute(text("DROP TABLE location_cache_temp"))
         conn.commit()
 
-def get_cached_locations(location_type='municipality'):
+def get_cached_locations():
     """Get cached locations from database."""
     try:
         engine = get_db_connection()
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT location_identifier, latitude, longitude FROM location_cache WHERE location_type = :type"), 
-                                {'type': location_type})
+            result = conn.execute(text("SELECT location_name, latitude, longitude FROM location_cache"))
             return {row[0]: (float(row[1]), float(row[2])) for row in result.fetchall()}
     except:
         return {}
 
-def geocode_postal_codes(employer_data):
-    """Geocode employers based on postal codes with caching."""
-    
-    # Get cached postal code locations
-    cached_locations = get_cached_locations('postal_code')
-    locations = {}
-    locations_to_save = []
-    
-    geolocator = Nominatim(user_agent="bc_employment_explorer")
-    
-    # Get unique postal codes
-    unique_postal_codes = employer_data['postal_code'].dropna().unique()
-    unique_postal_codes = [pc for pc in unique_postal_codes if pc.strip()]  # Remove empty strings
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    total_locations = len(unique_postal_codes)
-    
-    for i, postal_code in enumerate(unique_postal_codes):
-        postal_key = postal_code.strip().upper()
-        
-        if postal_key in cached_locations:
-            locations[postal_key] = cached_locations[postal_key]
-            status_text.text(f"Loading cached location for {postal_key}...")
-        else:
-            status_text.text(f"Geocoding postal code {postal_key}... ({i+1}/{total_locations})")
-            
-            try:
-                # Try with postal code and province
-                location = geolocator.geocode(f"{postal_key}, British Columbia, Canada")
-                
-                if location:
-                    coord = (location.latitude, location.longitude)
-                    locations[postal_key] = coord
-                    locations_to_save.append({
-                        'location_identifier': postal_key,
-                        'location_type': 'postal_code',
-                        'latitude': location.latitude,
-                        'longitude': location.longitude
-                    })
-                else:
-                    # Fallback without province
-                    location = geolocator.geocode(f"{postal_key}, Canada")
-                    if location:
-                        coord = (location.latitude, location.longitude)
-                        locations[postal_key] = coord
-                        locations_to_save.append({
-                            'location_identifier': postal_key,
-                            'location_type': 'postal_code',
-                            'latitude': location.latitude,
-                            'longitude': location.longitude
-                        })
-                
-                # Rate limiting to respect API limits
-                time.sleep(0.8)
-                
-            except GeocoderTimedOut:
-                st.warning(f"Geocoding timeout for {postal_key}")
-            except Exception as e:
-                st.warning(f"Error geocoding {postal_key}: {str(e)}")
-        
-        progress_bar.progress((i + 1) / total_locations)
-    
-    # Save new locations to database
-    if locations_to_save:
-        save_locations_to_db(locations_to_save)
-    
-    progress_bar.empty()
-    status_text.empty()
-    
-    return locations
-
 @st.cache_data
-def geocode_municipalities(municipalities):
+def geocode_locations(municipalities):
     """Geocode municipality locations with caching."""
     
     # Get cached locations first
-    cached_locations = get_cached_locations('municipality')
+    cached_locations = get_cached_locations()
     locations = {}
     locations_to_save = []
     
@@ -197,26 +121,24 @@ def geocode_municipalities(municipalities):
             
             try:
                 # Try with province for better accuracy
-                location = geolocator.geocode(f"{municipality}, British Columbia, Canada")
+                location = geolocator.geocode(f"{municipality}, British Columbia, Canada", timeout=10)
                 
                 if location:
                     coord = (location.latitude, location.longitude)
                     locations[municipality] = coord
                     locations_to_save.append({
-                        'location_identifier': municipality,
-                        'location_type': 'municipality',
+                        'location_name': municipality,
                         'latitude': location.latitude,
                         'longitude': location.longitude
                     })
                 else:
                     # Fallback to just municipality name
-                    location = geolocator.geocode(f"{municipality}, BC")
+                    location = geolocator.geocode(f"{municipality}, BC", timeout=10)
                     if location:
                         coord = (location.latitude, location.longitude)
                         locations[municipality] = coord
                         locations_to_save.append({
-                            'location_identifier': municipality,
-                            'location_type': 'municipality',
+                            'location_name': municipality,
                             'latitude': location.latitude,
                             'longitude': location.longitude
                         })
@@ -240,8 +162,8 @@ def geocode_municipalities(municipalities):
     
     return locations
 
-def create_overview_map(df, municipality_locations):
-    """Create overview map with municipality clusters."""
+def create_map(df, municipality_locations):
+    """Create Folium map with employer locations."""
     
     # Center map on BC
     bc_center = [53.7267, -127.6476]
@@ -313,107 +235,6 @@ def create_overview_map(df, municipality_locations):
     
     return m
 
-def create_detailed_municipality_map(df, postal_code_locations, selected_municipality):
-    """Create detailed map showing individual employer pins for a specific municipality."""
-    
-    # Filter data for the selected municipality
-    municipality_data = df[df['municipality_name'] == selected_municipality].copy()
-    
-    if municipality_data.empty:
-        return None
-    
-    # Calculate center point for the municipality
-    valid_coords = []
-    for _, employer in municipality_data.iterrows():
-        postal_key = employer['postal_code'].strip().upper() if employer['postal_code'] else ''
-        if postal_key in postal_code_locations:
-            lat, lon = postal_code_locations[postal_key]
-            valid_coords.append((lat, lon))
-    
-    if not valid_coords:
-        # Fallback to BC center if no coordinates found
-        center_lat, center_lon = 53.7267, -127.6476
-        zoom_level = 10
-    else:
-        # Calculate center from valid coordinates
-        center_lat = sum(coord[0] for coord in valid_coords) / len(valid_coords)
-        center_lon = sum(coord[1] for coord in valid_coords) / len(valid_coords)
-        zoom_level = 12
-    
-    # Create map centered on municipality
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom_level, tiles='OpenStreetMap')
-    
-    # Color palette for constituencies
-    constituency_colors = [
-        'red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred',
-        'beige', 'darkblue', 'darkgreen', 'cadetblue', 'darkpurple', 'white',
-        'pink', 'lightblue', 'lightgreen', 'gray', 'black', 'lightgray'
-    ]
-    
-    constituencies = municipality_data['constituency'].unique()
-    color_map = {constituency: constituency_colors[i % len(constituency_colors)] 
-                for i, constituency in enumerate(constituencies)}
-    
-    added_markers = 0
-    markers_without_location = 0
-    
-    # Add individual employer markers
-    for _, employer in municipality_data.iterrows():
-        postal_key = employer['postal_code'].strip().upper() if employer['postal_code'] else ''
-        
-        if postal_key in postal_code_locations:
-            lat, lon = postal_code_locations[postal_key]
-            
-            # Create popup content for individual employer
-            popup_content = f"""
-            <div style="width: 250px;">
-            <b>{employer['organization_name']}</b><br>
-            <b>Constituency:</b> {employer['constituency']}<br>
-            <b>Municipality:</b> {employer['municipality_name']}<br>
-            <b>Postal Code:</b> {employer['postal_code']}<br>
-            """
-            
-            if employer['email']:
-                popup_content += f"<b>Email:</b> <a href='mailto:{employer['email']}'>{employer['email']}</a><br>"
-            
-            popup_content += "</div>"
-            
-            # Get constituency color
-            marker_color = color_map.get(employer['constituency'], 'gray')
-            
-            # Create marker with custom icon
-            folium.Marker(
-                location=[lat, lon],
-                popup=folium.Popup(popup_content, max_width=300),
-                tooltip=employer['organization_name'],
-                icon=folium.Icon(color=marker_color, icon='building', prefix='fa')
-            ).add_to(m)
-            
-            added_markers += 1
-        else:
-            markers_without_location += 1
-    
-    # Add legend
-    legend_html = f'''
-    <div style="position: fixed; 
-                bottom: 50px; left: 50px; width: 250px; height: auto; 
-                background-color: white; border:2px solid grey; z-index:9999; 
-                font-size:12px; padding: 10px">
-    <b>{selected_municipality} Employers</b><br>
-    <b>Mapped:</b> {added_markers}<br>
-    <b>No Location:</b> {markers_without_location}<br><br>
-    <b>Constituencies:</b><br>
-    '''
-    
-    for constituency, color in color_map.items():
-        count = len(municipality_data[municipality_data['constituency'] == constituency])
-        legend_html += f'<i class="fa fa-circle" style="color:{color}"></i> {constituency} ({count})<br>'
-    
-    legend_html += '</div>'
-    m.get_root().html.add_child(folium.Element(legend_html))
-    
-    return m, added_markers, markers_without_location
-
 def create_csv_download(data: pd.DataFrame) -> bytes:
     """Create CSV download from filtered data."""
     csv_buffer = io.StringIO()
@@ -473,58 +294,21 @@ def main():
     with col1:
         st.subheader("🗺️ Interactive Map")
         
-        # Map type selection
-        map_type = st.radio(
-            "Choose Map Type",
-            options=["Overview (Municipality Clusters)", "Detailed (Individual Employers)"],
-            index=0,
-            help="Overview shows municipalities as clusters. Detailed shows individual employers as pins."
-        )
-        
-        if map_type == "Overview (Municipality Clusters)":
-            if st.button("🌍 Generate Overview Map", type="primary"):
-                with st.spinner("Geocoding municipalities and creating overview map..."):
-                    # Get unique municipalities for geocoding
-                    unique_municipalities = filtered_df['municipality_name'].unique()
-                    municipality_locations = geocode_municipalities(unique_municipalities)
+        if st.button("🌍 Generate Map with Locations", type="primary"):
+            with st.spinner("Geocoding municipalities and creating map..."):
+                # Get unique municipalities for geocoding
+                unique_municipalities = filtered_df['municipality_name'].unique()
+                municipality_locations = geocode_locations(unique_municipalities)
+                
+                # Create and display map
+                if municipality_locations:
+                    map_obj = create_map(filtered_df, municipality_locations)
+                    map_html = map_obj._repr_html_()
+                    components.html(map_html, height=500)
                     
-                    # Create and display map
-                    if municipality_locations:
-                        map_obj = create_overview_map(filtered_df, municipality_locations)
-                        map_html = map_obj._repr_html_()
-                        components.html(map_html, height=500)
-                        
-                        st.success(f"Overview map generated with {len(municipality_locations)} municipalities!")
-                    else:
-                        st.error("No municipality locations could be geocoded.")
-        
-        else:  # Detailed map
-            if selected_municipality != 'All':
-                if st.button("📍 Generate Detailed Employer Map", type="primary"):
-                    with st.spinner(f"Geocoding postal codes for {selected_municipality} employers..."):
-                        # Get employers for the selected municipality
-                        municipality_data = filtered_df[filtered_df['municipality_name'] == selected_municipality]
-                        
-                        if not municipality_data.empty:
-                            # Geocode based on postal codes
-                            postal_code_locations = geocode_postal_codes(municipality_data)
-                            
-                            # Create detailed map
-                            map_result = create_detailed_municipality_map(municipality_data, postal_code_locations, selected_municipality)
-                            
-                            if map_result:
-                                map_obj, mapped_count, unmapped_count = map_result
-                                map_html = map_obj._repr_html_()
-                                components.html(map_html, height=500)
-                                
-                                st.success(f"Detailed map for {selected_municipality} generated!")
-                                st.info(f"📍 {mapped_count} employers mapped, {unmapped_count} without location data")
-                            else:
-                                st.error("Could not create map for selected municipality.")
-                        else:
-                            st.warning("No employers found for the selected municipality.")
-            else:
-                st.info("💡 Please select a specific municipality to view detailed employer locations.")
+                    st.success(f"Map generated with {len(municipality_locations)} geocoded locations!")
+                else:
+                    st.error("No locations could be geocoded.")
     
     with col2:
         st.subheader("📋 Filtered Data")
