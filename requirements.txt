@@ -1,1 +1,7 @@
 streamlit
+pandas
+folium
+geopy
+sqlalchemy
+psycopg2-binary
+openpyxl

@@ -1,0 +1,18 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "folium>=0.20.0",
+    "geopy>=2.4.1",
+    "notion-client>=2.4.0",
+    "openpyxl>=3.1.5",
+    "pandas>=2.3.1",
+    "psycopg2-binary>=2.9.10",
+    "requests>=2.32.4",
+    "sqlalchemy>=2.0.42",
+    "streamlit>=1.47.1",
+    "trafilatura>=2.0.0",
+    "urllib3>=2.5.0",
+]
