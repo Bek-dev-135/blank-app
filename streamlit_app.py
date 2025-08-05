@@ -362,3 +362,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+    st.markdown(
+        """
+        <hr>
+        <div style='text-align: center; font-size: 16px;'>
+            Made by <a href="https://bereketeababebe.pythonanywhere.com/" target="_blank">Bek Abebe</a>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
